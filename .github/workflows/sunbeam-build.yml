@@ -1,0 +1,182 @@
+---
+name: "sunbeam build"
+
+# Build + smoke on every PR into sunbeam/main and every push to it.
+# Publish to ghcr ONLY on push (merge) or manual dispatch — PRs are
+# build-and-smoke only, so the gate runs before anything is published.
+
+on:
+  pull_request:
+    branches: ["sunbeam/main"]
+  push:
+    branches: ["sunbeam/main"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish image to ghcr (dispatch builds are publish-on by default to mirror merges)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: sunbeam-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sunbeam-build:
+    name: sunbeam-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Describe base
+        id: describe
+        run: |
+          git remote add upstream https://github.com/gitroomhq/postiz-app.git || true
+          git fetch upstream main --tags --quiet
+          upstream="$(git rev-parse upstream/main)"
+          base_tag="$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || echo unknown)"
+          echo "base_tag=${base_tag}" >> "$GITHUB_OUTPUT"
+          echo "sha7=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Sunbeam build"
+            echo "- base tag: \`${base_tag}\`"
+            echo "- built sha: \`${GITHUB_SHA::7}\`"
+            echo "- upstream main: \`${upstream::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Docker buildx (amd64)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (matches upstream build-containers.yml)
+        env:
+          NEXT_PUBLIC_VERSION: sunbeam-${{ steps.describe.outputs.base_tag }}-${{ steps.describe.outputs.sha7 }}
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -f Dockerfile.dev \
+            -t postiz-ci:${{ steps.describe.outputs.sha7 }} \
+            --build-arg NEXT_PUBLIC_VERSION=${NEXT_PUBLIC_VERSION} \
+            --pull \
+            --provenance=false --sbom=false \
+            --load \
+            .
+
+      # Smoke = the estate stack in miniature: Postgres, Temporal, valkey,
+      # then the real image. Temporal is REQUIRED by the backend (NestJS
+      # TemporalRegister onModuleInit exits without it) — no stubbing.
+      - name: Start dependencies (postgres / temporal / valkey)
+        run: |
+          docker network create smoke >/dev/null
+          docker run -d --name pg --network smoke -p 5432:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            postgres:17-alpine
+          docker run -d --name valkey --network smoke -p 6379:6379 \
+            valkey/valkey:8-alpine
+          docker run -d --name temporal --network smoke -p 7233:7233 \
+            -e DB=postgres12 -e DB_PORT=5432 \
+            -e POSTGRES_SEEDS=pg -e POSTGRES_USER=postgres -e POSTGRES_PWD=postgres \
+            -e TEMPORAL_NAMESPACE=postiz -e DEFAULT_NAMESPACE=postiz \
+            -e BIND_ON_IP=0.0.0.0 -e SKIP_ADD_CUSTOM_SEARCH_ATTRIBUTES=true \
+            temporalio/auto-setup:1.28.1
+          for i in $(seq 1 60); do
+            docker exec pg pg_isready -U postgres >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec pg psql -U postgres -c "CREATE USER postiz WITH LOGIN PASSWORD 'postiz';"
+          docker exec pg psql -U postgres -c "CREATE DATABASE postiz_db OWNER postiz;"
+
+      - name: Run image
+        run: |
+          docker run -d --name postiz --network smoke -p 5000:5000 \
+            -e MAIN_URL=http://localhost:5000 \
+            -e FRONTEND_URL=http://localhost:5000 \
+            -e NEXT_PUBLIC_BACKEND_URL=http://localhost:5000/api \
+            -e BACKEND_INTERNAL_URL=http://localhost:3000 \
+            -e DATABASE_URL=postgresql://postiz:postiz@pg:5432/postiz_db?sslmode=disable \
+            -e REDIS_URL=redis://valkey:6379 \
+            -e JWT_SECRET=ci-smoke-secret-not-a-real-credential \
+            -e TEMPORAL_ADDRESS=temporal:7233 \
+            -e TEMPORAL_NAMESPACE=postiz \
+            -e IS_GENERAL=true \
+            -e DISABLE_REGISTRATION=false \
+            -e STORAGE_PROVIDER=local \
+            -e UPLOAD_DIRECTORY=/uploads \
+            -e NEXT_PUBLIC_UPLOAD_DIRECTORY=/uploads \
+            postiz-ci:${{ steps.describe.outputs.sha7 }}
+
+      - name: Wait for the app (prisma db push + pm2 boot)
+        run: |
+          ok=""
+          for i in $(seq 1 90); do
+            body="$(curl -s --max-time 5 http://localhost:5000/api/auth/can-register || true)"
+            if echo "$body" | grep -q '"register"'; then ok="$body"; break; fi
+            sleep 5
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::app did not become ready"
+            docker logs postiz --tail 100 || true
+            exit 1
+          fi
+          echo "can-register: $ok"
+
+      - name: Assert auth + app surfaces
+        run: |
+          code_home="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/)"
+          code_auth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/auth)"
+          code_upl="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/uploads/)"
+          code_oauth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/api/auth/oauth/GENERIC)"
+          echo "home=$code_home auth=$code_auth uploads=$code_upl oauth=$code_oauth"
+          {
+            echo "### Smoke"
+            echo "| surface | code |"
+            echo "|---|---|"
+            echo "| / | $code_home |"
+            echo "| /auth | $code_auth |"
+            echo "| /uploads/ | $code_upl |"
+            echo "| /api/auth/oauth/GENERIC | $code_oauth |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$code_home" = "307" ] || [ "$code_home" = "200" ]
+          [ "$code_auth" = "200" ]
+          [ "$code_oauth" = "200" ]
+          docker exec postiz sh -c 'pnpm pm2 jlist' | grep -c '"status":"online"' | grep -q '^3$'
+
+      - name: Login to ghcr
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish
+        id: publish
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        run: |
+          T1="${IMAGE}:sunbeam-${{ steps.describe.outputs.base_tag }}-${{ steps.describe.outputs.sha7 }}"
+          T2="${IMAGE}:sunbeam-latest"
+          docker tag postiz-ci:${{ steps.describe.outputs.sha7 }} "$T1"
+          docker tag postiz-ci:${{ steps.describe.outputs.sha7 }} "$T2"
+          docker push "$T1"
+          docker push "$T2"
+          digest="$(docker buildx imagetools inspect "$T1" | awk '/^Digest:/ {print $2}')"
+          {
+            echo "### Published"
+            echo "- \`$T1\`"
+            echo "- \`$T2\`"
+            echo "- digest: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker logs postiz --tail 200 2>/dev/null || true
+          docker logs temporal --tail 100 2>/dev/null || true
