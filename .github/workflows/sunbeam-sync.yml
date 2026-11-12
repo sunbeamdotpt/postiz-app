@@ -92,26 +92,32 @@ jobs:
         if: steps.rebase.outputs.rebase == 'ok'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           shortlog="$(git log --oneline sunbeam/main..sync/upstream | head -15)"
           patchy="$(git rev-list --count upstream/main..sunbeam/main)"
-          pr="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number' || echo '')"
-          if [ -z "$pr" ]; then
-            gh pr create \
-              --base sunbeam/main --head "$branch" \
-              --title "sync: upstream main $(date -u +%F)" \
-              --body "Automated rebase of sunbeam work onto upstream main.
+          body="Automated rebase of sunbeam work onto upstream main.
 
           <details><summary>incoming commits (tail)</summary>
 
           \`\`\`
           ${shortlog}
           \`\`\`
-          </details>" || true
+          </details>"
+          # REST endpoint (GraphQL createPullRequest has been denied to
+          # GITHUB_TOKEN on this org even with PR creation allowed).
+          pr="$(gh api "repos/$REPO/pulls" -X POST \
+            -f title="sync: upstream main $(date -u +%F)" \
+            -f head="$branch" -f base="sunbeam/main" \
+            -f body="$body" --jq '.number' 2>/dev/null || echo '')"
+          if [ -z "$pr" ]; then
             pr="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')"
           fi
+          [ -n "$pr" ] || { echo "::error::PR creation failed"; exit 1; }
+          echo "pr=$pr" >> "$GITHUB_ENV"
           if [ "$patchy" -gt 0 ]; then
             gh pr merge "$pr" --auto --rebase || echo "auto-merge armed; waiting for checks"
           else
-            gh pr comment "$pr" --body "Vanilla pin (no sunbeam commits yet): left unmerged on purpose — merging moves sunbeam/main off the pinned upstream tag. Merge manually when starting the patch base." || true
+            gh pr comment "$pr" --body "Vanilla pin (no sunbeam commits yet): left unmerged on purpose — merging moves sunbeam/main off the pinned upstream tag. Merge manually when starting the patch base."
           fi
