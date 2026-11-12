@@ -111,7 +111,14 @@ jobs:
             -e STORAGE_PROVIDER=local \
             -e UPLOAD_DIRECTORY=/uploads \
             -e NEXT_PUBLIC_UPLOAD_DIRECTORY=/uploads \
+            -e POSTIZ_GENERIC_OAUTH=true \
+            -e POSTIZ_OAUTH_AUTH_URL=http://localhost:9999/oauth2/auth \
+            -e POSTIZ_OAUTH_TOKEN_URL=http://localhost:9999/oauth2/token \
+            -e POSTIZ_OAUTH_USERINFO_URL=http://localhost:9999/oauth2/userinfo \
+            -e POSTIZ_OAUTH_CLIENT_ID=ci-client \
+            -e POSTIZ_OAUTH_CLIENT_SECRET=ci-secret \
             postiz-ci:${{ steps.describe.outputs.sha7 }}
+          docker exec postiz mkdir -p /uploads
 
       - name: Wait for the app (prisma db push + pm2 boot)
         run: |
@@ -133,8 +140,11 @@ jobs:
           code_home="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/)"
           code_auth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/auth)"
           code_upl="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/uploads/)"
+          sleep 2
           code_oauth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/api/auth/oauth/GENERIC)"
+          oauth_url="$(curl -s http://localhost:5000/api/auth/oauth/GENERIC | head -c 120)"
           echo "home=$code_home auth=$code_auth uploads=$code_upl oauth=$code_oauth"
+          echo "oauth url head: $oauth_url"
           {
             echo "### Smoke"
             echo "| surface | code |"
@@ -146,7 +156,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           [ "$code_home" = "307" ] || [ "$code_home" = "200" ]
           [ "$code_auth" = "200" ]
+          [ "$code_upl" = "403" ]
           [ "$code_oauth" = "200" ]
+          echo "$oauth_url" | grep -q "localhost:9999/oauth2/auth"
           docker exec postiz sh -c 'pnpm pm2 jlist' | grep -c '"status":"online"' | grep -q '^3$'
 
       - name: Login to ghcr
