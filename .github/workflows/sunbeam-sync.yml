@@ -1,0 +1,117 @@
+---
+name: "sunbeam sync"
+
+# Keep sunbeam/main rebased on upstream main. Opens a PR when upstream
+# moved; the build workflow gates it. On rebase conflict: fail loud, no
+# publish, open/update a sync-conflict issue — silent drift is the thing
+# this exists to prevent.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sunbeam-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout sunbeam/main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: sunbeam/main
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "sunbeam-fork-bot"
+          git config user.email "bot@sunbeam.pt"
+          git remote add upstream https://github.com/gitroomhq/postiz-app.git
+          git fetch upstream main --tags --quiet
+          echo "sunbeam_head=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "upstream_head=$(git rev-parse upstream/main)" >> "$GITHUB_ENV"
+          echo "sunbeam-only commits vs upstream:"
+          git log --oneline upstream/main..HEAD | head -20 || true
+
+      - name: No-op check
+        id: noop
+        run: |
+          # no-op only when sunbeam/main already contains the upstream tip
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "upstream/main is already contained in sunbeam/main — nothing to sync."
+            echo "noop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "noop=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase sunbeam work onto upstream/main
+        id: rebase
+        if: steps.noop.outputs.noop != 'true'
+        run: |
+          git checkout -B sync/upstream HEAD
+          if git rebase upstream/main; then
+            echo "rebase=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "rebase=conflict" >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+          fi
+
+      - name: Open/update sync-conflict issue on rebase failure
+        if: steps.rebase.outputs.rebase == 'conflict'
+        run: |
+          existing="$(gh issue list --label sync-conflict --state open --json number --jq '.[0].number' || echo '')"
+          body="**Upstream rebase failed at $(date -u +%FT%TZ).** sunbeam/main needs a manual rebase onto upstream/main (${upstream_head}). sunbeam-only commits:
+
+          $(git log --oneline upstream/main..sunbeam/main || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "sync-conflict: rebase onto upstream/main failed" --label sync-conflict --body "$body"
+          fi
+          exit 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Push sync branch
+        if: steps.rebase.outputs.rebase == 'ok'
+        run: |
+          branch="sync/upstream-$(date -u +%Y%m%d-%H%M)"
+          git push origin "sync/upstream:refs/heads/$branch" --force-with-lease
+          echo "branch=$branch" >> "$GITHUB_ENV"
+
+      - name: Open PR (auto-merge only when sunbeam patches exist)
+        if: steps.rebase.outputs.rebase == 'ok'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shortlog="$(git log --oneline sunbeam/main..sync/upstream | head -15)"
+          patchy="$(git rev-list --count upstream/main..sunbeam/main)"
+          pr="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number' || echo '')"
+          if [ -z "$pr" ]; then
+            gh pr create \
+              --base sunbeam/main --head "$branch" \
+              --title "sync: upstream main $(date -u +%F)" \
+              --body "Automated rebase of sunbeam work onto upstream main.
+
+          <details><summary>incoming commits (tail)</summary>
+
+          \`\`\`
+          ${shortlog}
+          \`\`\`
+          </details>" || true
+            pr="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')"
+          fi
+          if [ "$patchy" -gt 0 ]; then
+            gh pr merge "$pr" --auto --rebase || echo "auto-merge armed; waiting for checks"
+          else
+            gh pr comment "$pr" --body "Vanilla pin (no sunbeam commits yet): left unmerged on purpose — merging moves sunbeam/main off the pinned upstream tag. Merge manually when starting the patch base." || true
+          fi
