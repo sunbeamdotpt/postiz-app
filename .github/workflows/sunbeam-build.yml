@@ -159,7 +159,7 @@ jobs:
           [ "$code_upl" = "403" ]
           [ "$code_oauth" = "200" ]
           echo "$oauth_url" | grep -q "localhost:9999/oauth2/auth"
-          docker exec postiz pm2 jlist | grep -c '"status":"online"' | grep -q '^3$'
+          docker exec postiz pm2 jlist | grep -o '"status":"online"' | wc -l | grep -q '^3$'
 
       - name: Login to ghcr
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
