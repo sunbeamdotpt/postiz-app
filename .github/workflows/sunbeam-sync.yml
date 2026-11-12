@@ -95,7 +95,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          shortlog="$(git log --oneline sunbeam/main..sync/upstream | head -15)"
+          shortlog="$(git log --oneline -15 upstream/main..sunbeam/main)"
           patchy="$(git rev-list --count upstream/main..sunbeam/main)"
           body="Automated rebase of sunbeam work onto upstream main.
 
@@ -110,7 +110,7 @@ jobs:
           pr="$(gh api "repos/$REPO/pulls" -X POST \
             -f title="sync: upstream main $(date -u +%F)" \
             -f head="$branch" -f base="sunbeam/main" \
-            -f body="$body" --jq '.number' 2>/dev/null || echo '')"
+            -f body="$body" --jq '.number')"
           if [ -z "$pr" ]; then
             pr="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')"
           fi
