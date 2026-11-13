@@ -8,7 +8,7 @@ import { pricing } from '@gitroom/nestjs-libraries/database/prisma/subscriptions
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import dayjs from 'dayjs';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
-import { Organization, ShortLinkPreference, User } from '@prisma/client';
+import { Organization, ShortLinkPreference, User, Provider } from '@prisma/client';
 import { AutopostService } from '@gitroom/nestjs-libraries/database/prisma/autopost/autopost.service';
 
 @Injectable()
@@ -31,7 +31,7 @@ export class OrganizationService {
   }
 
   createUserOnly(
-    body: { email: string; password: string; provider: string; providerId?: string },
+    body: { email: string; password: string; provider: Provider; providerId?: string },
     ip: string,
     userAgent: string
   ) {
