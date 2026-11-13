@@ -66,13 +66,13 @@ export function Register({ invited }: { invited?: boolean }) {
     }
   }, [provider, code]);
   if (!code && !provider) {
-    return <RegisterAfter token="" provider="LOCAL" />;
+    return <RegisterAfter token="" provider="LOCAL" invited={invited} />;
   }
   if (!show) {
     return <LoadingComponent />;
   }
   return (
-    <RegisterAfter token={code} provider={provider?.toUpperCase() || 'LOCAL'} />
+    <RegisterAfter token={code} provider={provider?.toUpperCase() || 'LOCAL'} invited={invited} />
   );
 }
 function getHelpfulReasonForRegistrationFailure(httpCode: number) {
