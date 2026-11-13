@@ -467,7 +467,7 @@ export class OrganizationRepository {
     ip: string,
     userAgent: string
   ) {
-    return this._organization.model.user.create({
+    return this._user.model.user.create({
       data: {
         activated: body.provider !== 'LOCAL' || !hasEmail,
         email: body.email,
@@ -481,8 +481,6 @@ export class OrganizationRepository {
         agent: userAgent,
       },
     });
-  }
-
   }
 
   async createOrgAndUser(
