@@ -1,5 +1,5 @@
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
-import { Role, ShortLinkPreference, SubscriptionTier } from '@prisma/client';
+import { Provider, Role, ShortLinkPreference, SubscriptionTier } from '@prisma/client';
 import { Injectable } from '@nestjs/common';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { CreateOrgUserDto } from '@gitroom/nestjs-libraries/dtos/auth/create.org.user.dto';
@@ -462,7 +462,7 @@ export class OrganizationRepository {
   // no org row is created for them. Without this, every SSO invite created
   // a junk organization owned by the invitee (upstream #2199/#819).
   async createUserOnly(
-    body: { email: string; password: string; provider: string; providerId?: string },
+    body: { email: string; password: string; provider: Provider; providerId?: string },
     hasEmail: boolean,
     ip: string,
     userAgent: string
