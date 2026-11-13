@@ -456,6 +456,7 @@ export class OrganizationRepository {
     });
 
     return create;
+  }
 
   // Invited users (org cookie JWT) register into an EXISTING organization —
   // no org row is created for them. Without this, every SSO invite created
