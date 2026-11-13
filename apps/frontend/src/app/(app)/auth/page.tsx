@@ -13,16 +13,12 @@ export const metadata: Metadata = {
 };
 export default async function Auth(params: {searchParams: Promise<{provider: string}>}) {
   const t = await getT();
+  const orgCookie = (await cookies()).get('org')?.value;
   if (process.env.DISABLE_REGISTRATION === 'true') {
     const canRegister = (
       await (await internalFetch('/auth/can-register')).json()
     ).register;
-    const orgCookie = (await cookies()).get('org')?.value;
-    if (
-      !canRegister &&
-      !(await params?.searchParams)?.provider &&
-      !orgCookie
-    ) {
+    if (!canRegister && !orgCookie && !(await params?.searchParams)?.provider) {
       return (
         <>
           <LoginWithOidc />
@@ -37,5 +33,5 @@ export default async function Auth(params: {searchParams: Promise<{provider: str
       );
     }
   }
-  return <Register />;
+  return <Register invited={!!orgCookie} />;
 }

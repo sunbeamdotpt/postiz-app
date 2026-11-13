@@ -456,6 +456,32 @@ export class OrganizationRepository {
     });
 
     return create;
+
+  // Invited users (org cookie JWT) register into an EXISTING organization —
+  // no org row is created for them. Without this, every SSO invite created
+  // a junk organization owned by the invitee (upstream #2199/#819).
+  async createUserOnly(
+    body: { email: string; password: string; provider: string; providerId?: string },
+    hasEmail: boolean,
+    ip: string,
+    userAgent: string
+  ) {
+    return this._organization.model.user.create({
+      data: {
+        activated: body.provider !== 'LOCAL' || !hasEmail,
+        email: body.email,
+        password: body.password
+          ? AuthService.hashPassword(body.password)
+          : '',
+        providerName: body.provider,
+        providerId: body.providerId || '',
+        timezone: 0,
+        ip,
+        agent: userAgent,
+      },
+    });
+  }
+
   }
 
   async createOrgAndUser(
