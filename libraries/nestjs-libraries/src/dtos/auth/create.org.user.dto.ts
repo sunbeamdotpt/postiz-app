@@ -1,6 +1,7 @@
 import {
   IsDefined,
   IsEmail,
+  IsOptional,
   IsString,
   MaxLength,
   MinLength,
@@ -30,8 +31,10 @@ export class CreateOrgUserDto {
   @ValidateIf((o) => !o.providerToken)
   email: string;
 
+  // Optional so invited users (org cookie JWT) can register into an
+  // existing organization without naming one; the invite path ignores it.
+  @IsOptional()
   @IsString()
-  @IsDefined()
   @MinLength(3)
   @MaxLength(128)
   company: string;

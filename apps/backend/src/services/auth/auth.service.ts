@@ -43,6 +43,10 @@ export class AuthService {
       }
       if (body instanceof CreateOrgUserDto) {
         body.email = body.email.toLowerCase();
+        // company is optional for invites; local org naming needs something
+        if (!body.company) {
+          body.company = `${body.email.split('@')[0]}'s workspace`;
+        }
       }
       const user = await this._userService.getUserByEmail(body.email);
       if (body instanceof CreateOrgUserDto) {
@@ -50,26 +54,48 @@ export class AuthService {
           throw new Error('Email already exists');
         }
 
-        const hasInvite = addToOrg && typeof addToOrg !== 'boolean';
-        if (!(await this.canRegister(provider)) && !hasInvite) {
+        const invite =
+          addToOrg && typeof addToOrg !== 'boolean' ? addToOrg : null;
+
+        if (!invite && !(await this.canRegister(provider))) {
           throw new Error('Registration is disabled');
         }
 
-        const create = await this._organizationService.createOrgAndUser(
-          body,
-          ip,
-          userAgent
-        );
+        let create;
+        if (invite) {
+          // Invited users join an existing organization — never create one.
+          create = {
+            users: [
+              {
+                user: await this._organizationService.createUserOnly(
+                  {
+                    email: body.email,
+                    password: body.password,
+                    provider,
+                    providerId: '',
+                  },
+                  ip,
+                  userAgent
+                ),
+              },
+            ],
+          };
+        } else {
+          create = await this._organizationService.createOrgAndUser(
+            body,
+            ip,
+            userAgent
+          );
+        }
 
-        const addedOrg =
-          addToOrg && typeof addToOrg !== 'boolean'
-            ? await this._organizationService.addUserToOrg(
-                create.users[0].user.id,
-                addToOrg.id,
-                addToOrg.orgId,
-                addToOrg.role
-              )
-            : false;
+        const addedOrg = invite
+          ? await this._organizationService.addUserToOrg(
+              create.users[0].user.id,
+              invite.id,
+              invite.orgId,
+              invite.role
+            )
+          : false;
 
         const obj = { addedOrg, jwt: await this.jwt(create.users[0].user) };
         await this._emailService.sendEmailSync(
@@ -95,7 +121,8 @@ export class AuthService {
       provider,
       body as CreateOrgUserDto,
       ip,
-      userAgent
+      userAgent,
+      addToOrg
     );
 
     const addedOrg =
@@ -142,7 +169,8 @@ export class AuthService {
     provider: Provider,
     body: CreateOrgUserDto,
     ip: string,
-    userAgent: string
+    userAgent: string,
+    addToOrg?: boolean | { orgId: string; role: 'USER' | 'ADMIN'; id: string }
   ) {
     const providerInstance = this._providerManager.getProvider(provider);
     const providerUser = await providerInstance.getUser(body.providerToken);
@@ -159,31 +187,59 @@ export class AuthService {
       return user;
     }
 
-    if (!(await this.canRegister(provider))) {
+    const invite =
+      addToOrg && typeof addToOrg !== 'boolean' ? addToOrg : null;
+
+    if (!invite && !(await this.canRegister(provider))) {
       throw new Error('Registration is disabled');
     }
 
-    const create = await this._organizationService.createOrgAndUser(
-      {
-        company: body.company,
-        email: providerUser.email,
-        password: '',
-        provider,
-        providerId: providerUser.id,
-        datafast_visitor_id: body.datafast_visitor_id,
-      },
-      ip,
-      userAgent
-    );
+    let create;
+    if (invite) {
+      // Invited users join an existing organization — never create one
+      // (upstream #2199/#819: the junk-org creation broke team invites).
+      create = {
+        id: '',
+        users: [
+          {
+            user: await this._organizationService.createUserOnly(
+              {
+                email: providerUser.email,
+                password: '',
+                provider,
+                providerId: providerUser.id,
+              },
+              ip,
+              userAgent
+            ),
+          },
+        ],
+      };
+    } else {
+      create = await this._organizationService.createOrgAndUser(
+        {
+          company: body.company,
+          email: providerUser.email,
+          password: '',
+          provider,
+          providerId: providerUser.id,
+          datafast_visitor_id: body.datafast_visitor_id,
+        },
+        ip,
+        userAgent
+      );
+    }
 
     this._track('register', providerUser.email, body.datafast_visitor_id).catch(
       (err) => {}
     );
 
-    await NewsletterService.register(providerUser.email);
+    if (!invite) {
+      await NewsletterService.register(providerUser.email);
+    }
 
     try {
-      if (providerInstance?.postRegistration) {
+      if (!invite && providerInstance?.postRegistration) {
         await providerInstance.postRegistration(body.providerToken, create.id);
       }
     } catch (err) {
